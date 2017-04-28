@@ -160,24 +160,28 @@ void loop(){
     scale(&whatreads, &_ready);
   }
 
+  while(1){
+    color(&whatreads);
+    FREQ_to_RGB(&whatreads);
 
+    Serial.print("R = "); Serial.print(whatreads.rgb.R);
+    Serial.print("G = "); Serial.print(whatreads.rgb.G);
+    Serial.print("B = "); Serial.println(whatreads.rgb.B);
   
-//  FREQ_to_RGB(&whatreads);
-
-//  CIE_tristimulus(&whatreads);      // nie wiem
-//  Serial.print(whatreads.rgb.cct);  // czy tego
-//  Serial.println("K");              // potrzebuje
-
-  //float Luminance = map(kolor[3], scaled_max_min.L_min_scaled, scaled_max_min.L_max_scaled, 0, 100);
-  //Luminance = constrain(kolor[3], 0, 100);
-
-  //convert_RGB_to_0_to_100_scale();
-  //RGB_to_HSL(kolor[0], kolor[1], kolor[2], Hue, Saturation, Luminance);
-
-  //Serial.print("Hue: "); Serial.println(Hue*360);
-  //Serial.print("Saturation: "); Serial.println(Saturation);
-  //Serial.print("Luminance: "); Serial.println(Luminance);
-
+  //  CIE_tristimulus(&whatreads);      // nie wiem
+  //  Serial.print(whatreads.rgb.cct);  // czy tego
+  //  Serial.println("K");              // potrzebuje
+    
+ //   float Luminance; //= map(whatreads.kolor[3], whatreads.min_max.L_min_scaled, whatreads.min_max.L_max_scaled, 0, 100);
+   // Luminance = constrain(whatreads.kolor[3], 0, 100);
+  
+//    convert_RGB_to_0_to_100_scale(&whatreads);
+//    RGB_to_HSL(&whatreads, Hue, Saturation, Luminance);
+  
+//    Serial.print("Hue: "); Serial.println(Hue*360);
+//    Serial.print("Saturation: "); Serial.println(Saturation);
+//    Serial.print("Luminance: "); Serial.println(Luminance);
+  }
   //distance();
 }
 
@@ -191,7 +195,7 @@ void loop(){
  *  |1   1   | Zielony  |     |1   1   | 100%                    |  *
  ********************************************************************/
 
-void color(struct reads_t *r, int toRGB){
+void color(struct reads_t *r){
   digitalWrite(s2, LOW);           //R
   digitalWrite(s3, LOW);
   r->kolor[0] = pulseIn(out, LOW);
@@ -221,20 +225,20 @@ void color(struct reads_t *r, int toRGB){
 }
 
 void FREQ_to_RGB(struct reads_t *r){
-  r->kolor[0] = (r->kolor[0] - r->min_max.R_min_scaled) * (255 - 0) / (r->min_max.R_max_scaled - r->min_max.R_min_scaled) + 0;  //skalowanie do formatu RGB
-  r->kolor[0] = constrain(r->kolor[0], 0, 255);
+  r->rgb.R = (r->kolor[0] - r->min_max.R_min_scaled) * (255 - 0) / (r->min_max.R_max_scaled - r->min_max.R_min_scaled) + 0;  //skalowanie do formatu RGB
+  r->rgb.R = constrain(r->rgb.R, 0, 255);
   if(DEBUG==1){
     Serial.print("R = "); Serial.println(r->kolor[0]);
   }
 
-  r->kolor[1] = (r->kolor[1] - r->min_max.G_min_scaled) * (255 - 0) / (r->min_max.G_max_scaled - r->min_max.G_min_scaled) + 0;  //skalowanie do formatu RGB
-  r->kolor[1] = constrain(r->kolor[1], 0, 255);
+  r->rgb.G = (r->kolor[1] - r->min_max.G_min_scaled) * (255 - 0) / (r->min_max.G_max_scaled - r->min_max.G_min_scaled) + 0;  //skalowanie do formatu RGB
+  r->rgb.G = constrain(r->rgb.G, 0, 255);
   if(DEBUG==1){
     Serial.print("G = "); Serial.println(r->kolor[1]);
   }
 
-  r->kolor[2] = (r->kolor[2] - r->min_max.B_min_scaled) * (255 - 0) / (r->min_max.B_max_scaled - r->min_max.B_min_scaled) + 0;  //skalowanie do formatu RGB
-  r->kolor[2] = constrain(r->kolor[2], 0, 255);
+  r->rgb.B = (r->kolor[2] - r->min_max.B_min_scaled) * (255 - 0) / (r->min_max.B_max_scaled - r->min_max.B_min_scaled) + 0;  //skalowanie do formatu RGB
+  r->rgb.B = constrain(r->rgb.B, 0, 255);
   if(DEBUG==1){
     Serial.print("B = "); Serial.println(r->kolor[2]);
   }
@@ -271,12 +275,14 @@ void CIE_tristimulus(struct reads_t *r){
   return;
 }
 
-//void RGB_to_HSL(float Red, float Green, float Blue, float& Hue, float& Saturation, float& Luminance){
+//void RGB_to_HSL(struct reads_t *r, float& Hue, float& Saturation, float& Luminance){
 //  float fmin, fmax;
-//  fmax = max(max(Red, Green), Blue);
-//  fmin = min(min(Red, Green), Blue);
+//  fmax = max(max(r->rgb.R, r->rgb.G), r->rgb.B);
+//  fmin = min(min(r->rgb.R, r->rgb.G), r->rgb.B);
 //
-//  Luminance = fmax;
+//  //Luminance = fmax;
+//  Luminance = map(Luminance, r->min_max.L_min_scaled, r->min_max.L_max_scaled, 0, 100);
+//  Luminance = constrain(r->kolor[3], 0, 100);
 //  if (fmax > 0)
 //    Saturation = (fmax - fmin) / fmax;
 //  else
@@ -285,12 +291,12 @@ void CIE_tristimulus(struct reads_t *r){
 //  if (Saturation == 0)
 //    Hue = 0;
 //  else{
-//    if(fmax == Red)
-//      Hue = (Green - Blue) / (fmax - fmin);
-//    else if (fmax == Green)
-//      Hue = 2 + (Blue - Red) / (fmax - fmin);
+//    if(fmax == r->rgb.R)
+//      Hue = (r->rgb.G - r->rgb.B) / (fmax - fmin);
+//    else if (fmax == r->rgb.G)
+//      Hue = 2 + (r->rgb.B - r->rgb.R) / (fmax - fmin);
 //    else
-//      Hue = 4 + (Red - Green) / (fmax - fmin);
+//      Hue = 4 + (r->rgb.R - r->rgb.G) / (fmax - fmin);
 //    Hue = Hue / 6;
 //    if (Hue < 0) Hue += 1;
 //  }
@@ -300,7 +306,7 @@ void CIE_tristimulus(struct reads_t *r){
 void collect(struct reads_t *r){
   int flag = 1;
   for(int i = 0; i < NUMBER_OF_MEASUREMENTS; ++i){
-    color(r, 0);
+    color(r);
     for(int j = 0; j < 4; ++j){ 
       if(i < NUMBER_OF_MEASUREMENTS){
         r->stats.tab[i][j] = r->kolor[j];
