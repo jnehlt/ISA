@@ -1,16 +1,18 @@
+#include <SD.h>
+#include <SPI.h>
 #include <Servo.h>
 
-#define s0 12
-#define s1 11
-#define s2 10
-#define s3 9
-#define out 8
-#define servoYpin 7
-#define servoXpin 6
-#define resetSD 5
-#define clockSD 4
-#define dataSD 3
-#define busySD 2
+#define s0 9
+#define s1 8
+#define s2 7
+#define s3 6
+#define out 5
+#define servoYpin 3
+#define servoXpin 4
+#define CLK 13
+#define MISO 12
+#define MOSI 11
+#define CS 10
 #define NUMBER_OF_MEASUREMENTS 50
 #define DEBUG 0
 
@@ -19,6 +21,7 @@ Servo servoY;
 
 int _ready = 0;
 int z = 0;
+
 
 struct stats_t{
   float tab[NUMBER_OF_MEASUREMENTS][4]; 
@@ -71,57 +74,14 @@ struct reads_t{
                               0   // clear photodiode
                             };
   volatile long duration;
-
-  void scaleMAX(void){  //for white
-    if(min_max.B_max < kolor[2])
-      min_max.B_max = kolor[2];
-    Serial.print("B_max = ");
-    Serial.print(min_max.B_max);
-    Serial.print(" ");
-    if(min_max.G_max < kolor[1])
-      min_max.G_max = kolor[1];
-    Serial.print("G_max = ");
-    Serial.print(min_max.G_max);
-    Serial.print(" ");
-    if(min_max.R_max < kolor[0])
-      min_max.R_max = kolor[0];
-    Serial.print("R_max = ");
-    Serial.print(min_max.R_max);
-    Serial.print(" ");
-    if(min_max.L_max < kolor[3])
-      min_max.L_max = kolor[3];
-    Serial.print("L_max = ");
-    Serial.print(min_max.L_max);
-    Serial.println(" ");
-  
-    return;
-  }
-  
-  void scaleMIN(void){  //for black
-    if(min_max.B_min > kolor[2])
-      min_max.B_min = kolor[2];
-    Serial.print("B_min = ");
-    Serial.print(min_max.B_min);
-    Serial.print(" ");
-    if(min_max.G_min > kolor[1])
-      min_max.G_min = kolor[1];
-    Serial.print("G_min = ");
-    Serial.print(min_max.G_min);
-    Serial.print(" ");
-    if(min_max.R_min > kolor[0])
-      min_max.R_min = kolor[0];
-    Serial.print("R_min = ");
-    Serial.print(min_max.R_min);
-    Serial.print(" ");
-    if(min_max.L_min > kolor[3])
-      min_max.L_min = kolor[3];
-    Serial.print("L_min = ");
-    Serial.print(min_max.L_min);
-    Serial.println(" ");
-  
-    return;
-  }  
+ 
 };
+
+void test(const char* str)
+{
+  Serial.print(str);
+  Serial.flush();
+}
 
 void setup(){
   pinMode(s0, OUTPUT);
@@ -129,11 +89,16 @@ void setup(){
   pinMode(s2, OUTPUT);
   pinMode(s3, OUTPUT);
   pinMode(out, INPUT);
+  pinMode(CS, OUTPUT);
   Serial.begin(9600); 
-  digitalWrite(s0, LOW);  //czestotliwosc na wyjsciu:
-  digitalWrite(s1, HIGH); //2%
+  Serial.println("START");
+  digitalWrite(s0, HIGH);  //czestotliwosc na wyjsciu:
+  digitalWrite(s1, HIGH);  //100%
+  delay(1000);
+  
   servoY.attach(servoYpin);
   servoX.attach(servoXpin);
+
 }
 
 void loop(){
@@ -141,10 +106,7 @@ void loop(){
   float Hue = 0, Saturation = 0;
 //  if(z==0){
 //    collect(&whatreads);
-//    z++;
-//  }   
-//    if(DEBUG==1){
-//      for(int j = 0; j < 4; ++j){
+//    z++;pk; j < 4; ++j){  
 //        for(int i = 0; i < NUMBER_OF_MEASUREMENTS; ++i){
 //          if(whatreads.stats.tab[i][j] != 0){
 //            Serial.print(whatreads.stats.tab[i][j]);
@@ -157,30 +119,47 @@ void loop(){
 //    }
 //  }
   if(!_ready){
+    Serial.println("nie redy ala ma kota");
+    test("a");
     scale(&whatreads, &_ready);
+    test("b");
+    delay(1000);
+
   }
+
+  if(_ready){
+    Serial.println("  redy");
+    servoY.detach();
+    servoX.detach();
+    delay(200);
+
+    sd_init();
+    pattern_to_SD();
+  }
+
+
 
   while(1){
     color(&whatreads);
     FREQ_to_RGB(&whatreads);
 
-    Serial.print("R = "); Serial.print(whatreads.rgb.R);
-    Serial.print("G = "); Serial.print(whatreads.rgb.G);
-    Serial.print("B = "); Serial.println(whatreads.rgb.B);
+//    Serial.print("R = "); Serial.print(whatreads.rgb.R);
+//    Serial.print("G = "); Serial.print(whatreads.rgb.G);
+//    Serial.print("B = "); Serial.println(whatreads.rgb.B);
   
   //  CIE_tristimulus(&whatreads);      // nie wiem
   //  Serial.print(whatreads.rgb.cct);  // czy tego
   //  Serial.println("K");              // potrzebuje
     
- //   float Luminance; //= map(whatreads.kolor[3], whatreads.min_max.L_min_scaled, whatreads.min_max.L_max_scaled, 0, 100);
-   // Luminance = constrain(whatreads.kolor[3], 0, 100);
+    float Luminance; //= map(whatreads.kolor[3], whatreads.min_max.L_min_scaled, whatreads.min_max.L_max_scaled, 0, 100);
+ //   Luminance = constrain(whatreads.kolor[3], 0, 100);
   
-//    convert_RGB_to_0_to_100_scale(&whatreads);
-//    RGB_to_HSL(&whatreads, Hue, Saturation, Luminance);
+    convert_RGB_to_0_to_100_scale(&whatreads);
+    RGB_to_HSL(&whatreads, Hue, Saturation, Luminance);
   
-//    Serial.print("Hue: "); Serial.println(Hue*360);
-//    Serial.print("Saturation: "); Serial.println(Saturation);
-//    Serial.print("Luminance: "); Serial.println(Luminance);
+    Serial.print("Hue: "); Serial.println(Hue*360);
+    Serial.print("Saturation: "); Serial.println(Saturation);
+    Serial.print("Luminance: "); Serial.println(Luminance);
   }
   //distance();
 }
@@ -275,36 +254,39 @@ void CIE_tristimulus(struct reads_t *r){
   return;
 }
 
-//void RGB_to_HSL(struct reads_t *r, float& Hue, float& Saturation, float& Luminance){
-//  float fmin, fmax;
-//  fmax = max(max(r->rgb.R, r->rgb.G), r->rgb.B);
-//  fmin = min(min(r->rgb.R, r->rgb.G), r->rgb.B);
-//
-//  //Luminance = fmax;
-//  Luminance = map(Luminance, r->min_max.L_min_scaled, r->min_max.L_max_scaled, 0, 100);
-//  Luminance = constrain(r->kolor[3], 0, 100);
-//  if (fmax > 0)
-//    Saturation = (fmax - fmin) / fmax;
-//  else
-//    Saturation = 0;
-//
-//  if (Saturation == 0)
-//    Hue = 0;
-//  else{
-//    if(fmax == r->rgb.R)
-//      Hue = (r->rgb.G - r->rgb.B) / (fmax - fmin);
-//    else if (fmax == r->rgb.G)
-//      Hue = 2 + (r->rgb.B - r->rgb.R) / (fmax - fmin);
-//    else
-//      Hue = 4 + (r->rgb.R - r->rgb.G) / (fmax - fmin);
-//    Hue = Hue / 6;
-//    if (Hue < 0) Hue += 1;
-//  }
-//  return;
-//}
+void RGB_to_HSL(struct reads_t *r, float& Hue, float& Saturation, float& Luminance){
+  float fmin, fmax;
+  fmax = max(max(r->rgb.R, r->rgb.G), r->rgb.B);
+  fmin = min(min(r->rgb.R, r->rgb.G), r->rgb.B);
+
+  //Luminance = fmax;
+  Luminance = map(Luminance, r->min_max.L_min_scaled, r->min_max.L_max_scaled, 0, 100);
+  //Luminance = constrain(r->kolor[3], 0, 100);
+  if (fmax > 0)
+    Saturation = (fmax - fmin) / fmax;
+  else
+    Saturation = 0;
+
+  if (Saturation == 0)
+    Hue = 0;
+  else{
+    if(fmax == r->rgb.R)
+      Hue = (r->rgb.G - r->rgb.B) / (fmax - fmin);
+    else if (fmax == r->rgb.G)
+      Hue = 2 + (r->rgb.B - r->rgb.R) / (fmax - fmin);
+    else
+      Hue = 4 + (r->rgb.R - r->rgb.G) / (fmax - fmin);
+    Hue = Hue / 6;
+    if (Hue < 0) Hue += 1;
+  }
+  return;
+}
 
 void collect(struct reads_t *r){
+    test("n");
+
   int flag = 1;
+
   for(int i = 0; i < NUMBER_OF_MEASUREMENTS; ++i){
     color(r);
     for(int j = 0; j < 4; ++j){ 
@@ -313,6 +295,9 @@ void collect(struct reads_t *r){
       }
     }
   }
+  test("o");
+
+
   statistical_processing(r);
   return;
 }
@@ -381,9 +366,16 @@ bool cleaning_data(struct reads_t *r){
 }
 
 void scale(struct reads_t *r, int *_ready){
+    test("c");
   servo_scale_black();
+      test("d");
+
   scale_black(r);
+      test("e");
+
   delay(4000);
+    test("f");
+
   
   servo_scale_white();
   scale_white(r);
@@ -413,15 +405,24 @@ int servo_start_position(){
 }
 
 void servo_scale_black(){
+      test("h");
   servoY.write(30);
+      test("i");
+
   servoX.write(0);
+    test("j");
 
   return;
 }
 
 void scale_black(struct reads_t *r){
+     test("k");
+
   collect(r);
+    test("l");
+
   choose_black(r);
+    test("m");
 
   return;
 }
@@ -457,8 +458,27 @@ void choose_white(struct reads_t *r){
   return;
 }
 
-//void build_cloud(void){
-//  for(int i = 0; i < 25; ++i){
-//    Serial.print("[ "); Serial.print(tab[i]); Serial.print(", "); Serial.print(tab[i+25]); Serial.print(", "); Serial.print(tab[i+50]); Serial.print(", "); Serial.print(tab[i+75]); Serial.println(" ]");
-//  }
-//}
+void sd_init(){
+  if(!SD.begin(CS)){
+    Serial.println("Nie znaleziono karty SD");
+    return;
+  }
+  Serial.println("Znaleziono karte SD");
+
+  return;
+}
+
+void pattern_to_SD(){
+  File database;
+  database = SD.open("database.txt", FILE_WRITE);
+  if(database){
+    Serial.print("Gotowy do działania");
+  }
+  else{
+    Serial.print("Nie znaleziono bazy danych wzorcow");
+  }
+  database.close();
+
+  return;
+}
+
