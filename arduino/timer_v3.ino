@@ -1,520 +1,382 @@
-/**********************
-* TIMER v1.5          *
-* SEBASTIAN BĄKAŁA    *
-**********************/
-
-#include "Buttons.h"
-#include "ISA7SegmentDisplay.h"
-#include "DueTimer.h"
-#include "LiquidCrystal.h"
-#include "ISALedControl.h"
+#include <SD.h>
 #include <SPI.h>
-#include "SH1106_SPI.h"
+#include <Servo.h>
 
-#include "obraz.h"
-SH1106_SPI_FB lcd2;
+#define s0 9
+#define s1 8
+#define s2 7
+#define s3 6
+#define out 5
+#define servoYpin 3
+#define servoXpin 4
+#define CLK 13
+#define MISO 12
+#define MOSI 11
+#define CS 10
+#define NUMBER_OF_MEASUREMENTS 50
+#define DEBUG 0
+
+Servo servoX;
+Servo servoY;
+
+int _ready = 0;
+int z = 0;
 
 
-//pin24 - speaker
-ISA7SegmentDisplay seg;
-Buttons set;
-LiquidCrystal lcd(26, 28, 29, 30, 31, 32);
-ISALedControl osiem;
+struct stats_t{
+  float tab[NUMBER_OF_MEASUREMENTS][4]; 
+  float sX[4] = {0,0,0,0};  //reads average
+  float sigmum[4] = {0,0,0,0};  //sum (read - reads average)^2
+  float variance[4] = {0,0,0,0};
+  float sd[4] = {0,0,0,0}; //standard deviation
+};
 
-float f_interwal;
-int x=0, y=0, pomocnicza_do_wygaszania=1;
-int pos, i, __time, kolejnaNiepotrzebnaZmienna;
-bool seg_blink, what;
+struct rgb_t{
+  volatile float R;
+  volatile float G;
+  volatile float B;
+  //float cct, cct2;  //CCT CCT2
+};
 
-bool gameOver = false;
-int score = 0;
-const int width = 8, height = 8;
-int fruitX, fruitY;
-int fX[100];
-int fY[100];
-enum direct {STOP = 0, LEFT, RIGHT, UP, DOWN};
-direct dir;
+struct scaled_t{
+  float R_min_scaled;
+  float G_min_scaled;
+  float B_min_scaled;
+  float L_min_scaled;
+  float R_max_scaled;
+  float G_max_scaled;
+  float B_max_scaled;
+  float L_max_scaled;
+  float saturation_irradiance = 600000.0;  //czestotliwosc pracy fotodiody krzemowej dla s0 = HIGH, s1 = HIGH
+};
 
-bool dark = true;
-const byte bez_kropki[10] = { //tablica bez kropek (dla 7segmentowego)+
-                              B11101101, // 0                         |
-                              B00001001, // 1                         |
-                              B10110101, // 2                         |
-                              B10011101, // 3                         |
-                              B01011001, // 4                         |
-                              B11011100, // 5                         |
-                              B11111100, // 6                         |
-                              B00001101, // 7                         |
-                              B11111101, // 8                         |
-                              B11011101  // 9                         |
-                            };  //------------------------------------+
+struct reads_t{
+  struct stats_t stats;
+  struct scaled_t min_max;
+  struct rgb_t rgb;
+  volatile float kolor[4];
+  volatile long duration;
+};
 
-const byte z_kropka[10] = { //tablica z kropkami (dla 7segmentowego)--+
-                            B11101111, // 0.                          |
-                            B00001011, // 1.                          |
-                            B10110111, // 2.                          |
-                            B10011111, // 3.                          |
-                            B01011011, // 4.                          |
-                            B11011110, // 5.                          |
-                            B11111110, // 6.                          |
-                            B00001111, // 7.                          |
-                            B11111111, // 8.                          |
-                            B11011111  // 9.                          |
-                          };  //--------------------------------------+
+void color(struct reads_t*);
+void FREQ_to_RGB(struct reads_t*);
+void convert_RGB_to_0_to_100_scale(struct reads_t*);
+void RGB_to_HSL(struct reads_t*, float&, float&, float&);
+void collect(struct reads_t*);
+void statistical_processing(struct reads_t*);
+void average(struct reads_t*);
+void variance_deviation(struct reads_t*);
+bool cleaning_data(struct reads_t*);
+void scale(struct reads_t*, int*);
+int servo_start_position();
+void servo_scale_black();
+void scale_black(struct reads_t*);
+void choose_black(struct reads_t*);
+void servo_scale_white();
+void choose_white(struct reads_t*);
+void sd_init();
+void pattern_to_SD();
 
-void hello(){ //powitanie (Tylko pierwsze uruchomienie) (pikanie)---+
-  int i = 2;                                                      //|
-  while(i)                                                        //|
-  {                                                               //|
-    digitalWrite(24, HIGH);                                       //|
-    delay(60);                                                    //|
-    digitalWrite(24, LOW);                                        //|
-    delay(60);                                                    //|
-    i--;                                                          //|
-  }                                                               //|
-  return;                                                         //|
-}//-----------------------------------------------------------------+
+void setup(){
+  Serial.begin(9600); 
+  pinMode(s0, OUTPUT);
+  pinMode(s1, OUTPUT);
+  pinMode(s2, OUTPUT);
+  pinMode(s3, OUTPUT);
+  pinMode(out, INPUT);
+  pinMode(CS, OUTPUT);
+  digitalWrite(s0, HIGH);  //czestotliwosc na wyjsciu:
+  digitalWrite(s1, HIGH);  //100%
+  servoY.attach(servoYpin);
+  servoX.attach(servoXpin);
+}
 
-void osiem_na_osiem(bool indeks_stanu_wyswietlacza, int etap){
-  static const int stan_wyswietlacza[2]={0,255};
-  switch (etap)
-  {
-    case 0: //zapal lub zgas wszystkie diody na wyswietlaczu
-      for(int zapalaj = 0; zapalaj < 8; zapalaj++)
-        osiem.setRow(zapalaj, stan_wyswietlacza[indeks_stanu_wyswietlacza]);
-    break;
+void loop(){
+  struct reads_t whatreads;
+  float Hue = 0, Saturation = 0;
 
-    case 1: //oblicz z jaka gestoscia maja gasnac diody
-      if(__time)
-        f_interwal = 1000000.0 * (__time )/ 64.0;
-    break;
+  if(!_ready){
+    scale(&whatreads, &_ready);
   }
+
+  if(_ready){
+    delay(800);
+    servoY.detach();
+    servoX.detach();
+    delay(25);
+    sd_init();
+    pattern_to_SD();
+  }
+
+  while(1){
+    color(&whatreads);
+    FREQ_to_RGB(&whatreads);
+
+//    Serial.print("R = "); Serial.print(whatreads.rgb.R);
+//    Serial.print("G = "); Serial.print(whatreads.rgb.G);
+//    Serial.print("B = "); Serial.println(whatreads.rgb.B);
+  
+  //  CIE_tristimulus(&whatreads);      // nie wiem
+  //  Serial.print(whatreads.rgb.cct);  // czy tego
+  //  Serial.println("K");              // potrzebuje
+    
+    float Luminance; //= map(whatreads.kolor[3], whatreads.min_max.L_min_scaled, whatreads.min_max.L_max_scaled, 0, 100);
+ //   Luminance = constrain(whatreads.kolor[3], 0, 100);
+  
+    convert_RGB_to_0_to_100_scale(&whatreads);
+    RGB_to_HSL(&whatreads, Hue, Saturation, Luminance);
+  
+    Serial.print("Hue: "); Serial.println(Hue*360);
+    Serial.print("Saturation: "); Serial.println(Saturation);
+    Serial.print("Luminance: "); Serial.println(Luminance);
+  }
+}
+
+/********************************************************************
+ *                      TCS 2300                                    *
+ *  |s2  s3  | Fotodioda|     |s0  s1  | Czestotliwosc na wyjsciu|  *
+ *  |--------+----------|     |--------+-------------------------|  *
+ *  |0   0   | Czerwony |     |0   0   | wylaczenie zasilania    |  *
+ *  |0   1   | Niebieski|     |0   1   | 2%                      |  *
+ *  |1   0   | Czysta   |     |1   0   | 20%                     |  *
+ *  |1   1   | Zielony  |     |1   1   | 100%                    |  *
+ ********************************************************************/
+
+void color(struct reads_t *r){
+  digitalWrite(s2, LOW);           //R
+  digitalWrite(s3, LOW);
+  r->kolor[0] = pulseIn(out, LOW);
+  r->kolor[0] = r->min_max.saturation_irradiance / r->kolor[0];
+
+  digitalWrite(s2, HIGH);          //G
+  digitalWrite(s3, HIGH);
+  r->kolor[1] = pulseIn(out, LOW);
+  r->kolor[1] = r->min_max.saturation_irradiance / r->kolor[1];
+  
+  digitalWrite(s2, LOW);           //B
+  digitalWrite(s3, HIGH);
+  r->kolor[2] = pulseIn(out, LOW);
+  r->kolor[2] = r->min_max.saturation_irradiance / r->kolor[2];
+
+  digitalWrite(s2, HIGH);          //C
+  digitalWrite(s3, LOW);
+  r->kolor[3] = pulseIn(out, LOW);
+  r->kolor[3] = r->min_max.saturation_irradiance / r->kolor[3];
+
+  delay(20);
+}
+
+void FREQ_to_RGB(struct reads_t *r){
+  r->rgb.R = (r->kolor[0] - r->min_max.R_min_scaled) * (255 - 0) / (r->min_max.R_max_scaled - r->min_max.R_min_scaled) + 0;  //skalowanie do formatu RGB
+  r->rgb.R = constrain(r->rgb.R, 0, 255);
+  if(DEBUG==1){Serial.print("R = "); Serial.println(r->kolor[0]);}
+
+  r->rgb.G = (r->kolor[1] - r->min_max.G_min_scaled) * (255 - 0) / (r->min_max.G_max_scaled - r->min_max.G_min_scaled) + 0;  //skalowanie do formatu RGB
+  r->rgb.G = constrain(r->rgb.G, 0, 255);
+  if(DEBUG==1){Serial.print("G = "); Serial.println(r->kolor[1]);}
+
+  r->rgb.B = (r->kolor[2] - r->min_max.B_min_scaled) * (255 - 0) / (r->min_max.B_max_scaled - r->min_max.B_min_scaled) + 0;  //skalowanie do formatu RGB
+  r->rgb.B = constrain(r->rgb.B, 0, 255);
+  if(DEBUG==1){Serial.print("B = "); Serial.println(r->kolor[2]);}
+}
+
+void convert_RGB_to_0_to_100_scale(struct reads_t *r){
+  r->rgb.R = (((float) r->kolor[0]) / 65536) * 100;
+  r->rgb.G = (((float) r->kolor[1]) / 65536) * 100;
+  r->rgb.B = (((float) r->kolor[2])/ 65536) * 100;
+}
+
+//void CIE_tristimulus(struct reads_t *r){
+//  
+///************************ CIE_tristimulus_XYZ ********************/
+//  const float X = (-0.14282 * r->rgb.R) + (1.54924 * r->rgb.G) + (-0.95641 * r->rgb.B);
+//  const float Y = (-0.32466 * r->rgb.R) + (1.57837 * r->rgb.G) + (-0.73191 * r->rgb.B);
+//  const float Z = (-0.68202 * r->rgb.R) + (0.77073 * r->rgb.G) + (0.56332 * r->rgb.B);
+///*****************************************************************/
+//
+///********************** CHROMATICLY COORTINATES ******************/
+//  const float x = X / (X + Y + Z);
+//  const float y = Y / (X + Y + Z);
+///*****************************************************************/
+//
+///************************ McCamy's Formula ***********************/
+//  const float n = (x - 0.332) / (0.1858 - y);
+//  r->rgb.cct = (449 * n * n * n) + (3525 * n * n) + (6823.3 * n) + 5520.33; //CCT [Kelvin] <- for 'absolute' black object
+///*****************************************************************/
+//
+//  return;
+//}
+
+void RGB_to_HSL(struct reads_t *r, float& Hue, float& Saturation, float& Luminance){
+  float fmin, fmax;
+  fmax = max(max(r->rgb.R, r->rgb.G), r->rgb.B);
+  fmin = min(min(r->rgb.R, r->rgb.G), r->rgb.B);
+
+  Luminance = fmax;
+  //Luminance = map(Luminance, r->min_max.L_min_scaled, r->min_max.L_max_scaled, 0, 100);
+  //Luminance = constrain(r->kolor[3], 0, 100);
+  if (fmax > 0)
+    Saturation = (fmax - fmin) / fmax;
+  else
+    Saturation = 0;
+
+  if (Saturation == 0)
+    Hue = 0;
+  else{
+    if(fmax == r->rgb.R)
+      Hue = (r->rgb.G - r->rgb.B) / (fmax - fmin);
+    else if (fmax == r->rgb.G)
+      Hue = 2 + (r->rgb.B - r->rgb.R) / (fmax - fmin);
+    else
+      Hue = 4 + (r->rgb.R - r->rgb.G) / (fmax - fmin);
+    Hue = Hue / 6;
+    if (Hue < 0) Hue += 1;
+  }
+}
+
+void collect(struct reads_t *r){
+  for(int i = 0; i < NUMBER_OF_MEASUREMENTS; ++i){
+    color(r);
+    for(int j = 0; j < 4; ++j){ 
+      if(i < NUMBER_OF_MEASUREMENTS){
+        r->stats.tab[i][j] = r->kolor[j];
+      }
+    }
+  }
+  statistical_processing(r);
+}
+
+void statistical_processing(struct reads_t *r){
+  average(r);
+  variance_deviation(r);
+  if(cleaning_data(r))
+    average(r);
+}
+
+void average(struct reads_t *r){
+  for(int i = 0; i < 4; ++i){
+    for(int j = 0; j < NUMBER_OF_MEASUREMENTS; ++j){
+      if(r->stats.tab[j][i] != 0){
+        r->stats.sX[i] += r->stats.tab[j][i];
+      }
+    }
+    if(DEBUG==1){Serial.println();}
+    r->stats.sX[i] /= NUMBER_OF_MEASUREMENTS;
+    if(DEBUG==1){Serial.print("sX = "); Serial.println(r->stats.sX[i]);}
+  }
+}
+
+void variance_deviation(struct reads_t *r){
+  for(int i = 0; i < 4; ++i){
+    for(int j = 0; j < NUMBER_OF_MEASUREMENTS; ++j){
+      if(r->stats.tab[j][i] != 0){
+        r->stats.variance[i] += ( (r->stats.tab[j][i] - r->stats.sX[i]) * (r->stats.tab[j][i] - r->stats.sX[i]) ) / NUMBER_OF_MEASUREMENTS;
+      }
+    }
+    if(DEBUG==1){Serial.print("variance = "); Serial.println(r->stats.variance[i], 8);}
+    r->stats.sd[i] = sqrt(r->stats.variance[i]);
+    if(DEBUG==1){Serial.println(r->stats.sd[i], 8);}
+  }
+ 
+  for(int i = 0; i < 4; ++i){
+    r->stats.variance[i] = 0;
+  }
+}
+
+bool cleaning_data(struct reads_t *r){
+  int flag = 0;
+  for(int i = 0; i < 4; ++i){
+    for(int j = 0; j < NUMBER_OF_MEASUREMENTS; ++j){
+      if( r->stats.sX[i] - 2 * r->stats.sd[i] > r->stats.tab[j][i] || r->stats.sX[i] + 2 * r->stats.sd[i] < r->stats.tab[j][i] ){
+        if(DEBUG==1){Serial.println("clearing...");}
+        r->stats.tab[j][i] = 0;
+        flag = 1;
+      }
+      if(flag)
+        return true;
+    }
+  }
+  return false;
+}
+
+void scale(struct reads_t *r, int *_ready){
+  servo_scale_black();
+  scale_black(r);
+  delay(3000);
+  servo_scale_white();
+  scale_white(r);
+  delay(3000);
+
+  if(DEBUG==1){
+      Serial.print("R_min = "); Serial.print(r->min_max.R_min_scaled, 8); Serial.print("   ");
+      Serial.print("R_max = "); Serial.println(r->min_max.R_max_scaled, 8);
+      Serial.print("G_min = "); Serial.print(r->min_max.G_min_scaled, 8); Serial.print("   ");
+      Serial.print("G_max = "); Serial.println(r->min_max.G_max_scaled, 8);
+      Serial.print("B_min = "); Serial.print(r->min_max.B_min_scaled, 8); Serial.print("   ");
+      Serial.print("B_max = "); Serial.println(r->min_max.B_max_scaled, 8);
+      Serial.print("L_min = "); Serial.print(r->min_max.L_min_scaled, 8); Serial.print("   ");
+      Serial.print("L_max = "); Serial.println(r->min_max.L_max_scaled, 8);
+  }
+  *_ready = servo_start_position();
+}
+
+int servo_start_position(){
+  servoX.write(90);
+  servoY.write(110);
+  return 1;
+}
+
+void servo_scale_black(){
+  servoY.write(30);
+  servoX.write(0);
+}
+
+void scale_black(struct reads_t *r){
+  collect(r);
+  choose_black(r);
+}
+
+void choose_black(struct reads_t *r){
+  r->min_max.R_min_scaled = r->stats.sX[0];
+  r->min_max.G_min_scaled = r->stats.sX[1];
+  r->min_max.B_min_scaled = r->stats.sX[2];
+  r->min_max.L_min_scaled = r->stats.sX[3];
+}
+
+void servo_scale_white(){
+  servoX.write(180);
+}
+
+void scale_white(struct reads_t *r){
+  collect(r);
+  choose_white(r);
+}
+
+void choose_white(struct reads_t *r){
+  r->min_max.R_max_scaled = r->stats.sX[0];
+  r->min_max.G_max_scaled = r->stats.sX[1];
+  r->min_max.B_max_scaled = r->stats.sX[2];
+  r->min_max.L_max_scaled = r->stats.sX[3];
+}
+
+void sd_init(){
+  if(!SD.begin(CS)){
+    Serial.println("Nie znaleziono karty SD");
+    return;
+  }
+  Serial.println("Znaleziono karte SD");
   return;
 }
 
-void wygaszaj_diody(){
-  static int tablica_stanow[8][8]={
-                                    1,1,1,1,1,1,1,1,
-                                    1,1,1,1,1,1,1,1,
-                                    1,1,1,1,1,1,1,1,
-                                    1,1,1,1,1,1,1,1,
-                                    1,1,1,1,1,1,1,1,
-                                    1,1,1,1,1,1,1,1,
-                                    1,1,1,1,1,1,1,1,
-                                    1,1,1,1,1,1,1,1
-                                  };
-  
-  do{
-    x = random(0, 8);
-    y = random(0, 8);
-    if(tablica_stanow[x][y])
-    {
-      osiem.setLed(x, y, 0);
-      tablica_stanow[x][y] = 0;
-      break;
-    }
-  }while(1);
-  pomocnicza_do_wygaszania++;
-  if(pomocnicza_do_wygaszania == 65){
-    Timer6.stop();
-    Timer6.detachInterrupt();
-  }
-
-}
-
-void startowa(){ //przypisz od nowa wartosci startowe zmiennych globalnych, oraz odłącz uchwyty Timerów-------------------------------+
-/////// STAN STARTOWY WYŚWIETLACZA ///////                                                                                            |
-  seg.setLed(237, 0);              ///////                                                                                            |
-  seg.setLed(237, 1);              ///////                                                                                            |
-  seg.setLed(239, 2);              ///////                                                                                            |
-  seg.setLed(237, 3);              ///////                                                                                            |
-/////// STAN STARTOWY WYŚWIETLACZA ///////                                                                                            |
-  Timer4.stop();                                                                                                                    //|
-  Timer5.stop();                                                                                                                    //|
-  Timer4.detachInterrupt(); //odlaczenie poprzedniego uchwytu (w przypadku rozpoczecia programu kolejny raz)                          |
-  Timer5.detachInterrupt(); //odlaczenie poprzedniego uchwytu (w przypadku rozpoczecia programu kolejny raz)                          |
-  Timer4.attachInterrupt(set_tHrs_tMins); //timer odpowiedzialny za wlaczenie funkcji odpowiedzialnej za wprowadzanie danych          |
-  Timer5.attachInterrupt(mryga);  //timer odpowiedzialny za miganie aktualnie wprowadzanej wartosci na panelu liczbowym    |          |
-  Timer4.start(25000);  //--------------------------------------------------------------------------------------------|----+          |
-  Timer5.start(500000); //--------------------------------------------------------------------------------------------+               |
-  osiem_na_osiem(0, 0);                                                                                                             //|
-  lcd.setCursor(0,0);                                                                                                               //|
-  lcd.print("Dziesiatki");                                                                                                          //|
-  lcd.setCursor(0,1);                                                                                                               //|
-  lcd.print("minut");                                                                                                              //|
-  pos = 3;  // ustawienie pozycji migajacego segmentu na segment 'dziesiatki minut'                                                   |
-  __time = 0; // dla pewnosci ustaw wartosc czasu na 0                                                                                |
-  kolejnaNiepotrzebnaZmienna = 0; //zmienna pomocnicza uzywana w kilku funcjach                                                       |
-  seg_blink = true;                                                                                                                 //|
-  what = true;                                                                                                                      //|
-  return;                                                                                                                           //|
-}//-----------------------------------------------------------------------------------------------------------------------------------+
-
-void rozpocznij(){ //funkcja rozpoczynajaca odliczanie
-  seg.setLed(bez_kropki[(__time / 600)], 3);
-  seg.setLed(bez_kropki[(__time % 60) / 10], 1);
-  seg.setLed(bez_kropki[(__time % 10)], 0);
-
-  if(__time-1 <= 0){
-      Timer5.stop();
-      Timer5.detachInterrupt();
-      Timer5.attachInterrupt(alarm);
-      Timer5.start(250000);
-      return;
-  }
-  __time--;
-}
-
-void alarm(){ //funkcja do wydania sygnalu dzwiekowego i swietlnego w momencie skonczenia czasu odliczania
-
-  if(kolejnaNiepotrzebnaZmienna){
-    int sign[3]={0,237,239};
-    lcd.clear();
-    if(what){
-      seg.setLed(sign[what], 0);
-      seg.setLed(sign[what], 1);
-      seg.setLed(sign[what], 3);
-      seg.setLed(sign[what+1], 2);
-      lcd.setCursor(0,0);
-      lcd.print("ALARM");
-      digitalWrite(24, sign[what]);
-    }
-    else{
-      seg.setLed(sign[what], 0);
-      seg.setLed(sign[what], 1);
-      seg.setLed(sign[what], 2);
-      seg.setLed(sign[what], 3);
-      digitalWrite(24, sign[what]);
-    }
-    what = !what;
-    kolejnaNiepotrzebnaZmienna--;
+void pattern_to_SD(){
+  File database;
+  database = SD.open("database.txt", FILE_WRITE);
+  if(database){
+    Serial.print("Gotowy do działania");
   }
   else{
-    startowa();
+    Serial.print("Nie znaleziono bazy danych wzorcow");
   }
-}
-
-void mryga(){ //funkcja odpowiedzialna za mruganie (kropki przy odliczaniu lub aktualnie ustawianej cyfry)
-  if(seg_blink){
-    if(pos == 2){
-      if(what){
-        seg.setLed(z_kropka[i], pos);
-      }
-      else
-        seg.setLed(z_kropka[(__time / 60) % 10], 2);
-    }
-    else
-      seg.setLed(bez_kropki[i], pos);
-  }
-  else{
-    if(what)
-      seg.setLed(0, pos);
-    else
-      seg.setLed(bez_kropki[(__time / 60) % 10], 2);
-  }
-  seg_blink = !seg_blink;
-}
-
-void enter(){
-  lcd.setCursor(0,0);
-  lcd.clear();
-  switch (pos)
-  {
-    case 3:
-      lcd.print("Minuty");
-      __time += 600 * i;
-      seg.setLed(bez_kropki[i], pos);
-      break;
-    case 2:
-      lcd.print("Dziesiatki");
-      lcd.setCursor(0,1);
-      lcd.print("sekund");
-      __time += 60 * i;
-      seg.setLed(z_kropka[i], pos);
-      break;
-    case 1:
-      lcd.print("Sekundy");
-      __time += 10 * i;
-      seg.setLed(bez_kropki[i], pos);
-      break;
-    case 0:
-      seg.setLed(bez_kropki[i], pos);
-      if(__time > 1)
-        __time += i - 1;
-      else
-        __time += i;
-      osiem_na_osiem(0, 1); //oblicz interwal wygaszania diod
-      i = 0;
-      lcd.print("ODLICZANIE...");
-      seg_blink = 0;
-      kolejnaNiepotrzebnaZmienna = 10;
-      what = false; //do funkcji mryga()
-      pos = 2;  //do migajacej kropki
-      if(__time == 0){
-        osiem_na_osiem(0,0);
-        Timer4.detachInterrupt();
-        Timer5.detachInterrupt();
-        snake();
-        return;
-      }
-      osiem_na_osiem(1, 0); //zapal wszystkie diody na wyswietlaczu 8x8
-      Timer4.stop();
-      Timer4.detachInterrupt();
-      Timer5.detachInterrupt();
-      Timer4.attachInterrupt(mryga);
-      Timer5.attachInterrupt(rozpocznij);
-      Timer6.attachInterrupt(wygaszaj_diody);
-      Timer4.start(500000);
-      Timer5.start(1000000);
-      Timer6.start(f_interwal);
-      return;
-      break;
-  }
-  pos--;
-  i = 0;
-  kolejnaNiepotrzebnaZmienna = 0;
-}
-
-void set_tHrs_tMins(){//ustawianie czasu odliczania-------------------------------------------+
-  static int x;                                                                             //|
-  static const int przyciski[11] = {    //tablica z numeracją przycisków                      |
-                                    14, // 0 przyciski[0]                                     |
-                                    8,  // 1 przyciski[1]                                     |
-                                    9,  // 2 przyciski[2]                                     |
-                                    10, // 3 przyciski[3]                                     |
-                                    7,  // 4 przyciski[4]                                     |
-                                    6,  // 5 przyciski[5]                                     |
-                                    5,  // 6 przyciski[6]                                     |
-                                    0,  // 7 przyciski[7]                                     |
-                                    1,  // 8 przyciski[8]                                     |
-                                    2,  // 9 przyciski[9]                                     |
-                                    13  // enter przyciski[10]                                |
-                                   };                                                       //|
-  for(x = 0; x < 11; x++){                                                                  //|
-    if(set.buttonPressed(przyciski[x])){                                                    //|
-      if(x == 10)                                                                           //|
-        enter();                                                                            //|
-      else{                                                                                 //|
-        if(pos == 2)//wartosc z kropka                                                        |
-          seg.setLed(z_kropka[i = x], pos);                                                 //|
-        else{                                                                               //|
-          if(pos == 0)                                                                      //|
-            seg.setLed(bez_kropki[i = x], pos);                                             //|
-          else{                                                                             //|
-            if(x <= 5)//maksymalna wartosc dla liczb na pozycjach 3 oraz 1                    |
-              seg.setLed(bez_kropki[i = x], pos);                                           //|
-          }                                                                                 //|
-        }                                                                                   //|
-      }                                                                                     //|
-    }                                                                                       //|
-  }                                                                                         //|
-  kolejnaNiepotrzebnaZmienna++;                                                             //|
-}//-------------------------------------------------------------------------------------------+
-
-void snake()
-{
-  dir = STOP;
-  x = width / 2;
-  y = height / 2;
-  fruitX = 6;
-  fruitY = 6;
-  osiem.setLed(8 - y, x - 1, true);
-  txt(1);
-  Timer5.attachInterrupt(input);
-  Timer5.start(5);
-  Timer4.attachInterrupt(movment);
-  sSpeed();
-  fruit();
-}
-
-  void movment() {
-  osiem.clearDisplay();
-  switch (dir)
-  {
-    case LEFT:
-      x--;
-      if (x < 1)x = 8;
-      break;
-      
-    case RIGHT:
-      x++;
-      if (x > 8)x = 1;
-      break;
-      
-    case UP:
-      y++;
-      if (y > 8)y = 1;
-      break;
-      
-    case DOWN:
-      y--;
-      if (y < 1)y = 8;
-      break;
-      
-    default:
-      break;
-  }
-  osiem.setLed(8 - y, x - 1, true);
-
-  tail();
-  Timer5.start(5);
-  sSpeed();
-  fruit();
-
-  if(dir!=STOP)
-    txt(3);
-  else
-    txt(4);
-  collision();
-}
-
-void sSpeed() {
-  int value = analogRead(A9) / 128;
-  //value++;
-  Timer4.stop();
-
-  for (int i = 2; i < 10; i++)
-    digitalWrite(i, HIGH);
-
-  for (int i = 8-value ; i >= 2; i--) 
-    digitalWrite(i, LOW);
-  
-
-  Timer4.start((8-value) * 100000);
-}
-
-void fruit(){
-  dark = !dark;
-  if(fruitX==x&&fruitY==y){
-    score++;
-    points(score);
-    digitalWrite(24, HIGH);
-        //////////////////////////////////dodać tutaj do-while X/y fruit będzie rózne od ogona
-    do{
-      fruitX = random(width)+1;
-      fruitY = random(height)+1;
-    }while(fruitCollision());
-  }
-  osiem.setLed(8 - fruitY, fruitX - 1, dark);
-  
-  
-}
-
-void tail(){
-  for(int i=score;i>0;i--){
-    fX[i]=fX[i-1];
-    fY[i]=fY[i-1];
-  }
-  
-  fX[0]=x;
-  fY[0]=y;
-  for(int i=0;i<=score+1;i++){
-    osiem.setLed(8-fY[i],fX[i]-1,true);
-  }
-}
-
-void collision(){
-    for(int i=1;i<score+1;i++)
-      if(fX[i]==x&&fY[i]==y)
-        gameOver=true;
-
-    if(gameOver==true){
-      txt(2);
-      Timer5.stop();
-      Timer4.stop();
-    }
-}
-
-void txt(int tx){
-  lcd.clear();
-  switch(tx)
-  {
-    case 1:
-      lcd.setCursor(0, 0);
-      lcd.print("Zjedz Bugi");
-      lcd.setCursor(0, 1);
-      lcd.print("Wcisnij przycisk");
-      break;
-    case 2:
-      lcd.setCursor(0, 0);
-      lcd.print("Przegrales stary");
-      lcd.setCursor(0, 1);
-      lcd.print("Wcisnij reset ;(");
-      break;
-    case 3:
-      lcd.clear();
-      break;
-    case 4:
-      lcd.setCursor(0, 0);
-      lcd.print("Zjedz Bugi");
-      lcd.setCursor(0, 1);
-      lcd.print("Wcisnij przycisk");
-      break;
-    default:
-      lcd.clear();
-      break;  
-  }
-}
-
-bool fruitCollision(){
-  for(int i=1;i<score+1;i++)
-    if(fX[i]==fruitX&&fY[i]==fruitY)
-      return true;
-  return false;  
-}
-
-void points(int score){
-  seg.displayDigit(score%10,0);
-  seg.displayDigit(score/10,1);
-}
-
-void input() {
-  if ((set.buttonPressed(1) || analogRead(A10) > 900 )&& dir != DOWN) {
-    dir = UP; Timer5.stop();
-  }
-  if ((set.buttonPressed(7) || analogRead(A11) < 100 )&& dir != RIGHT) {
-    dir = LEFT; Timer5.stop();
-  }
-  if ((set.buttonPressed(5) || analogRead(A11) > 900) && dir != LEFT) {
-    dir = RIGHT; Timer5.stop();
-  }
-  if ((set.buttonPressed(6) || analogRead(A10) < 100 )&& dir != UP) {
-    dir = DOWN; Timer5.stop();
-  }
-  if (set.buttonPressed(0)) {
-    dir = STOP; Timer5.stop();
-  }
-  digitalWrite(24, LOW);
-}
-
-void setup() {
-  //lcd.begin();
-  lcd2.begin();
-  for (int i = 2; i <= 9; i++){
-    pinMode(i, OUTPUT);
-  }
-  pinMode(24, OUTPUT); //speaker signal ON
-  Serial.begin(9600);
-  osiem.init();
-  hello();
-  lcd.begin(16,2);//inicjalizacja rozmiaru wyświetlacza lcd
-  seg.init();//initializacja wyświetlacza 7io segmentowego
-  set.init();//initializacja przycisków
-  startowa();
-  randomSeed(analogRead(0));
-
-    bitmapa(obraz::width,obraz::height,obraz::header_data);
-    lcd2.renderAll();
-    //delay(5000);
-}
-
-void bitmapa(int wid, int hei, char bitmap[]){
-  for(int i=hei;i>0;i--){
-    for(int j=wid;j>0;j--){
-      lcd2.setPixel(j,i,bitmap[(i - 1)*wid + (j - 1)]);
-    }
-  }
-}
-
-void loop() {
+  database.close();
+  return;
 }
